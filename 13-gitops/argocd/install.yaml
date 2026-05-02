@@ -1,0 +1,138 @@
+# ArgoCD 安装与生产配置
+---
+# 1. ArgoCD 核心安装 (使用 Helm values)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: argocd
+---
+# 2. ArgoCD ConfigMap - 生产配置
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-cmd-params-cm
+  namespace: argocd
+data:
+  # 服务端口
+  server.port: "8080"
+  # Redis
+  redis.server: "argocd-redis:6379"
+  # 仓库并发数
+  reposerver.parallelism.limit: "10"
+  # 应用并发数
+  controller.operation.processors: "25"
+  controller.status.processors: "20"
+  # 自动同步
+  application.instanceLabelKey: argocd.argoproj.io/instance
+---
+# 3. ArgoCD RBAC - 企业级权限配置
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: argocd-rbac-cm
+  namespace: argocd
+data:
+  # 默认策略: 只读
+  policy.default: role:readonly
+  policy.csv: |
+    # 管理员 - 全部权限
+    p, role:admin, applications, *, */*, allow
+    p, role:admin, clusters, *, *, allow
+    p, role:admin, repositories, *, *, allow
+    p, role:admin, projects, *, *, allow
+    p, role:admin, logs, *, *, allow
+    p, role:admin, exec, *, */*, allow
+
+    # 开发者 - 开发环境读写, 其他只读
+    p, role:developer, applications, get, dev/*, allow
+    p, role:developer, applications, sync, dev/*, allow
+    p, role:developer, applications, create, dev/*, allow
+    p, role:developer, applications, update, dev/*, allow
+    p, role:developer, applications, delete, dev/*, allow
+    p, role:developer, applications, get, staging/*, allow
+    p, role:developer, applications, sync, staging/*, allow
+    p, role:developer, applications, get, production/*, allow
+    p, role:developer, logs, get, */*, allow
+
+    # 运维 - 全环境权限
+    p, role:ops, applications, *, */*, allow
+    p, role:ops, clusters, *, *, allow
+    p, role:ops, repositories, *, *, allow
+    p, role:ops, logs, *, *, allow
+
+    # QA - staging 读写
+    p, role:qa, applications, get, staging/*, allow
+    p, role:qa, applications, sync, staging/*, allow
+    p, role:qa, applications, get, dev/*, allow
+
+    # 用户组绑定
+    g, admin, role:admin
+    g, developers, role:developer
+    g, ops-team, role:ops
+    g, qa-team, role:qa
+---
+# 4. ArgoCD 项目 - 多项目隔离
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: frontend
+  namespace: argocd
+spec:
+  description: "前端应用项目"
+  sourceRepos:
+    - "git@github.com:company/frontend-*"
+    - "https://charts.example.com"
+  destinations:
+    - namespace: "frontend-*"
+      server: "https://kubernetes.default.svc"
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+  namespaceResourceWhitelist:
+    - group: ""
+      kind: "*"
+    - group: "apps"
+      kind: "*"
+    - group: "networking.k8s.io"
+      kind: Ingress
+  # 同步窗口 - 仅工作日部署
+  syncWindows:
+    - kind: allow
+      schedule: "0 9 * * 1-5"
+      duration: 10h
+      applications:
+        - "*"
+    - kind: deny
+      schedule: "0 0 * * 6,0"
+      duration: 48h
+      applications:
+        - "*"
+  # 角色
+  roles:
+    - name: developer
+      policies:
+        - p, proj:frontend:developer, applications, get, frontend/*, allow
+        - p, proj:frontend:developer, applications, sync, frontend/*, allow
+      groups:
+        - developers
+---
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: backend
+  namespace: argocd
+spec:
+  description: "后端服务项目"
+  sourceRepos:
+    - "git@github.com:company/backend-*"
+  destinations:
+    - namespace: "backend-*"
+      server: "https://kubernetes.default.svc"
+  clusterResourceWhitelist:
+    - group: ""
+      kind: Namespace
+  namespaceResourceWhitelist:
+    - group: ""
+      kind: "*"
+    - group: "apps"
+      kind: "*"

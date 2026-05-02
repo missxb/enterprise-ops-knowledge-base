@@ -1,0 +1,121 @@
+# Pod Security Standards - K8S Pod 安全策略
+# 参考: https://kubernetes.io/docs/concepts/security/pod-security-standards/
+---
+# 1. 限制性策略 (Restricted) - 生产环境必须
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-all-ingress
+  namespace: production
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+---
+# 2. OPA/Gatekeeper 约束 - 禁止特权容器
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sPSPPrivilegedContainer
+metadata:
+  name: deny-privileged
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces:
+      - production
+      - staging
+---
+# 3. OPA/Gatekeeper 约束 - 限制镜像来源
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sAllowedRepos
+metadata:
+  name: allowed-repos
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces:
+      - production
+      - staging
+  parameters:
+    repos:
+      - "registry.example.com/"
+      - "docker.io/library/"
+---
+# 4. OPA/Gatekeeper 约束 - 必须设置资源限制
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sContainerLimits
+metadata:
+  name: require-resource-limits
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces:
+      - production
+  parameters:
+    cpu: "2"
+    memory: "4Gi"
+---
+# 5. OPA/Gatekeeper 约束 - 禁止 hostNetwork
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sPSPHostNetworking
+metadata:
+  name: deny-host-network
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces:
+      - production
+      - staging
+---
+# 6. OPA/Gatekeeper 约束 - 必须有健康检查
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sRequiredProbes
+metadata:
+  name: require-probes
+spec:
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+    namespaces:
+      - production
+  parameters:
+    probes:
+      - readinessProbe
+      - livenessProbe
+---
+# 7. Falco 运行时威胁检测规则
+# falco_rules.yaml (关键规则摘录)
+# - rule: 容器内启动 shell
+#   desc: 检测容器内异常 shell 启动
+#   condition: >
+#     spawned_process and container and
+#     proc.name in (bash, sh, zsh, dash) and
+#     not proc.pname in (cron, crond)
+#   output: "容器内启动 shell (user=%user.name container=%container.name shell=%proc.name)"
+#   priority: WARNING
+#
+# - rule: 敏感文件读取
+#   desc: 检测对敏感文件的读取
+#   condition: >
+#     open_read and container and
+#     (fd.name startswith /etc/shadow or
+#      fd.name startswith /etc/passwd or
+#      fd.name startswith /etc/sudoers)
+#   output: "读取敏感文件 (user=%user.name file=%fd.name)"
+#   priority: CRITICAL
+#
+# - rule: 网络连接外连
+#   desc: 检测容器异常外连
+#   condition: >
+#     outbound and container and
+#     not (fd.sip in (private_ips) or fd.rip in (private_ips))
+#   output: "容器外连 (user=%user.name dest=%fd.rip:%fd.rport)"
+#   priority: NOTICE

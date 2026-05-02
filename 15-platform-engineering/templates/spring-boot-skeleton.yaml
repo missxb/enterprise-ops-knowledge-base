@@ -1,0 +1,150 @@
+# 黄金路径模板 - Spring Boot 微服务骨架
+# Backstage Template 使用的模板文件
+---
+# catalog-info.yaml (模板)
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: ${{ values.name | dump }}
+  description: ${{ values.description | dump }}
+  annotations:
+    github.com/project-slug: company/${{ values.name }}
+    backstage.io/techdocs-ref: dir:.
+  tags:
+    - java
+    - spring-boot
+spec:
+  type: service
+  lifecycle: development
+  owner: group:platform-team
+---
+# .gitlab-ci.yml (模板)
+image: maven:3.9-eclipse-temurin-${{ values.javaVersion }}
+
+variables:
+  MAVEN_OPTS: "-Dmaven.repo.local=.m2/repository"
+
+cache:
+  paths:
+    - .m2/repository/
+
+stages:
+  - test
+  - build
+  - scan
+  - deploy
+
+test:
+  stage: test
+  script:
+    - mvn clean test
+  artifacts:
+    reports:
+      junit: target/surefire-reports/*.xml
+
+build:
+  stage: build
+  script:
+    - mvn package -DskipTests
+    - docker build -t registry.example.com/${{ values.name }}:${CI_COMMIT_SHA:0:8} .
+    - docker push registry.example.com/${{ values.name }}:${CI_COMMIT_SHA:0:8}
+  only:
+    - main
+    - release/*
+
+scan:
+  stage: scan
+  script:
+    - trivy image --severity CRITICAL,HIGH registry.example.com/${{ values.name }}:${CI_COMMIT_SHA:0:8}
+  only:
+    - main
+
+deploy-dev:
+  stage: deploy
+  script:
+    - kubectl set image deployment/${{ values.name }} app=registry.example.com/${{ values.name }}:${CI_COMMIT_SHA:0:8} -n dev
+  environment:
+    name: dev
+  only:
+    - develop
+
+deploy-prod:
+  stage: deploy
+  script:
+    - kubectl set image deployment/${{ values.name }} app=registry.example.com/${{ values.name }}:${CI_COMMIT_SHA:0:8} -n production
+  environment:
+    name: production
+  when: manual
+  only:
+    - main
+---
+# Dockerfile (模板)
+FROM eclipse-temurin:${{ values.javaVersion }}-jre-alpine AS runtime
+
+RUN addgroup -g 1001 app && adduser -u 1001 -G app -s /bin/sh -D app
+
+WORKDIR /app
+COPY target/*.jar app.jar
+
+RUN chown -R app:app /app
+USER app
+
+EXPOSE 8080
+
+HEALTHCHECK --interval=30s --timeout=3s --start-period=30s --retries=3 \
+  CMD wget -qO- http://localhost:8080/actuator/health || exit 1
+
+ENTRYPOINT ["java", "-XX:+UseG1GC", "-XX:MaxRAMPercentage=75.0", "-jar", "app.jar"]
+---
+# K8S Deployment (模板)
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${{ values.name }}
+  labels:
+    app: ${{ values.name }}
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: ${{ values.name }}
+  template:
+    metadata:
+      labels:
+        app: ${{ values.name }}
+    spec:
+      containers:
+        - name: app
+          image: registry.example.com/${{ values.name }}:latest
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${{ values.name }}
+spec:
+  selector:
+    app: ${{ values.name }}
+  ports:
+    - port: 80
+      targetPort: 8080

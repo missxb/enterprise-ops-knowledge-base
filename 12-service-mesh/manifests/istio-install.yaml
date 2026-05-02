@@ -1,0 +1,118 @@
+# Istio 安装配置 - 企业级生产环境
+# 适用场景: 微服务治理、流量管理、安全通信
+apiVersion: install.istio.io/v1alpha1
+kind: IstioOperator
+metadata:
+  name: istio-production
+  namespace: istio-system
+spec:
+  profile: default
+  meshConfig:
+    # 访问日志
+    accessLogFile: /dev/stdout
+    accessLogEncoding: JSON
+    # 默认代理配置
+    defaultConfig:
+      # 分布式追踪
+      tracing:
+        sampling: 100.0
+        zipkin:
+          address: zipkin.istio-system:9411
+      # 代理资源限制
+      proxyMetadata:
+        ISTIO_META_DNS_CAPTURE: "true"
+        ISTIO_META_DNS_AUTO_ALLOCATE: "true"
+      holdApplicationUntilProxyStarts: true
+    # 启用 mTLS
+    enableAutoMtls: true
+    # 外部服务白名单
+    outboundTrafficPolicy:
+      mode: REGISTRY_ONLY
+  components:
+    # 控制平面
+    pilot:
+      k8s:
+        resources:
+          requests:
+            cpu: 500m
+            memory: 1Gi
+          limits:
+            cpu: 2000m
+            memory: 4Gi
+        hpaSpec:
+          minReplicas: 2
+          maxReplicas: 5
+          metrics:
+            - type: Resource
+              resource:
+                name: cpu
+                target:
+                  type: Utilization
+                  averageUtilization: 80
+        env:
+          - name: PILOT_TRACE_SAMPLING
+            value: "100"
+          - name: PILOT_ENABLE_STATUS
+            value: "true"
+    # 入口网关
+    ingressGateways:
+      - name: istio-ingressgateway
+        enabled: true
+        k8s:
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          hpaSpec:
+            minReplicas: 2
+            maxReplicas: 10
+          service:
+            type: LoadBalancer
+            ports:
+              - port: 80
+                targetPort: 8080
+                name: http2
+              - port: 443
+                targetPort: 8443
+                name: https
+              - port: 15021
+                targetPort: 15021
+                name: status-port
+          serviceAnnotations:
+            service.beta.kubernetes.io/alibaba-cloud-loadbalancer-spec: "slb.s2.small"
+    # 出口网关
+    egressGateways:
+      - name: istio-egressgateway
+        enabled: true
+        k8s:
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+  # 全局配置
+  values:
+    global:
+      proxy:
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+      # 镜像配置
+      hub: docker.io/istio
+      tag: 1.20.2
+    # 遥测
+    telemetry:
+      enabled: true
+      v2:
+        enabled: true
+        prometheus:
+          enabled: true

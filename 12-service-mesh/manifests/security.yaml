@@ -1,0 +1,106 @@
+# Istio 安全配置 - mTLS / 认证 / 授权
+---
+# 1. 全局 mTLS - 强制双向 TLS
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: default
+  namespace: istio-system
+spec:
+  mtls:
+    mode: STRICT
+---
+# 2. 命名空间级别 mTLS
+apiVersion: security.istio.io/v1beta1
+kind: PeerAuthentication
+metadata:
+  name: production-mtls
+  namespace: production
+spec:
+  mtls:
+    mode: STRICT
+  selector:
+    matchLabels:
+      app: app-service
+---
+# 3. JWT 认证 - API 网关层
+apiVersion: security.istio.io/v1beta1
+kind: RequestAuthentication
+metadata:
+  name: jwt-auth
+  namespace: istio-system
+spec:
+  selector:
+    matchLabels:
+      istio: ingressgateway
+  jwtRules:
+    - issuer: "https://auth.example.com"
+      jwksUri: "https://auth.example.com/.well-known/jwks.json"
+      audiences:
+        - "api.example.com"
+      forwardOriginalToken: true
+      outputPayloadToHeader: x-jwt-payload
+---
+# 4. 授权策略 - 拒绝所有未认证请求
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: deny-all
+  namespace: production
+spec:
+  {}
+---
+# 5. 授权策略 - 允许特定服务调用
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: allow-frontend-to-backend
+  namespace: production
+spec:
+  selector:
+    matchLabels:
+      app: backend-service
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/production/sa/frontend-service"]
+      to:
+        - operation:
+            methods: ["GET", "POST"]
+            paths: ["/api/v1/*"]
+    - from:
+        - source:
+            namespaces: ["monitoring"]
+      to:
+        - operation:
+            methods: ["GET"]
+            paths: ["/health", "/metrics"]
+---
+# 6. 授权策略 - 管理接口仅允许内部访问
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: admin-restrict
+  namespace: production
+spec:
+  selector:
+    matchLabels:
+      app: admin-service
+  action: DENY
+  rules:
+    - from:
+        - source:
+            notIpBlocks: ["10.0.0.0/8", "172.16.0.0/12"]
+      to:
+        - operation:
+            paths: ["/admin/*", "/actuator/*"]
+---
+# 7. 服务账号
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: app-service
+  namespace: production
+  labels:
+    app: app-service

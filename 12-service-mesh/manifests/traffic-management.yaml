@@ -1,0 +1,218 @@
+# Istio 流量管理 - 金丝雀发布 / A/B测试 / 流量镜像
+---
+# 1. 目标规则 - 定义服务版本子集
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: app-destination
+  namespace: production
+spec:
+  host: app-service
+  trafficPolicy:
+    connectionPool:
+      tcp:
+        maxConnections: 1000
+      http:
+        h2UpgradePolicy: DEFAULT
+        http1MaxPendingRequests: 100
+        http2MaxRequests: 1000
+        maxRequestsPerConnection: 100
+    loadBalancer:
+      simple: LEAST_REQUEST
+    outlierDetection:
+      consecutive5xxErrors: 5
+      interval: 30s
+      baseEjectionTime: 30s
+      maxEjectionPercent: 50
+  subsets:
+    - name: stable
+      labels:
+        version: stable
+    - name: canary
+      labels:
+        version: canary
+---
+# 2. 虚拟服务 - 金丝雀路由规则
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: app-canary
+  namespace: production
+spec:
+  hosts:
+    - app-service
+    - app.example.com
+  gateways:
+    - istio-ingressgateway
+    - mesh
+  http:
+    # 金丝雀: 10% 流量到新版本
+    - match:
+        - headers:
+            x-canary:
+              exact: "true"
+      route:
+        - destination:
+            host: app-service
+            subset: canary
+            port:
+              number: 8080
+    - route:
+        - destination:
+            host: app-service
+            subset: stable
+            port:
+              number: 8080
+          weight: 90
+        - destination:
+            host: app-service
+            subset: canary
+            port:
+              number: 8080
+          weight: 10
+      timeout: 30s
+      retries:
+        attempts: 3
+        perTryTimeout: 10s
+        retryOn: 5xx,reset,connect-failure,retriable-4xx
+---
+# 3. A/B 测试 - 基于 Header 路由
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: app-ab-test
+  namespace: production
+spec:
+  hosts:
+    - app.example.com
+  gateways:
+    - istio-ingressgateway
+  http:
+    # A/B: 移动端用户路由到 v2
+    - match:
+        - headers:
+            user-agent:
+              regex: ".*Mobile.*"
+      route:
+        - destination:
+            host: app-service
+            subset: canary
+    # 默认路由到稳定版
+    - route:
+        - destination:
+            host: app-service
+            subset: stable
+---
+# 4. 流量镜像 (暗发布)
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: app-mirror
+  namespace: production
+spec:
+  hosts:
+    - app-service
+  http:
+    - route:
+        - destination:
+            host: app-service
+            subset: stable
+      mirror:
+        host: app-service
+        subset: canary
+      mirrorPercentage:
+        value: 10.0
+---
+# 5. 故障注入测试
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: app-fault-injection
+  namespace: production
+spec:
+  hosts:
+    - app-service
+  http:
+    - match:
+        - headers:
+            x-test-fault:
+              exact: "true"
+      fault:
+        delay:
+          percentage:
+            value: 30
+          fixedDelay: 5s
+        abort:
+          percentage:
+            value: 10
+          httpStatus: 503
+      route:
+        - destination:
+            host: app-service
+            subset: stable
+    - route:
+        - destination:
+            host: app-service
+            subset: stable
+---
+# 6. 超时与重试
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: app-timeout
+  namespace: production
+spec:
+  hosts:
+    - app-service
+  http:
+    - route:
+        - destination:
+            host: app-service
+            subset: stable
+      timeout: 10s
+      retries:
+        attempts: 3
+        perTryTimeout: 3s
+        retryOn: 5xx,reset,connect-failure
+---
+# 7. 限流配置
+apiVersion: networking.istio.io/v1beta1
+kind: EnvoyFilter
+metadata:
+  name: rate-limit-filter
+  namespace: istio-system
+spec:
+  workloadSelector:
+    labels:
+      istio: ingressgateway
+  configPatches:
+    - applyTo: HTTP_FILTER
+      match:
+        context: GATEWAY
+        listener:
+          filterChain:
+            filter:
+              name: envoy.filters.network.http_connection_manager
+      patch:
+        operation: INSERT_BEFORE
+        value:
+          name: envoy.filters.http.local_ratelimit
+          typed_config:
+            "@type": type.googleapis.com/udpa.type.v1.TypedStruct
+            type_url: type.googleapis.com/envoy.extensions.filters.http.local_ratelimit.v3.LocalRateLimit
+            value:
+              stat_prefix: http_local_rate_limiter
+              token_bucket:
+                max_tokens: 1000
+                tokens_per_fill: 100
+                fill_interval: 1s
+              filter_enabled:
+                runtime_key: local_rate_limit_enabled
+                default_value:
+                  numerator: 100
+                  denominator: HUNDRED
+              filter_enforced:
+                runtime_key: local_rate_limit_enforced
+                default_value:
+                  numerator: 100
+                  denominator: HUNDRED

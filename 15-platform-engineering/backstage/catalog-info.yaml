@@ -1,0 +1,153 @@
+# Backstage 服务目录 - catalog-info.yaml 示例
+# 放在各服务仓库根目录, Backstage 自动发现
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: user-service
+  description: 用户服务 - 负责用户注册、登录、权限管理
+  annotations:
+    github.com/project-slug: company/user-service
+    backstage.io/techdocs-ref: dir:.
+    argocd/app-name: user-service-production
+    pagerduty.com/service-id: PXXXXXX
+  tags:
+    - java
+    - spring-boot
+    - user
+    - core
+  links:
+    - url: https://grafana.example.com/d/user-service
+      title: Grafana Dashboard
+      icon: dashboard
+    - url: https://argocd.example.com/applications/user-service-production
+      title: ArgoCD
+      icon: deployment
+  labels:
+    tier: tier-0
+    team: platform
+spec:
+  type: service
+  lifecycle: production
+  owner: group:platform-team
+  system: user-platform
+  providesApis:
+    - user-api
+  dependsOn:
+    - component:mysql-primary
+    - component:redis-cluster
+  consumesApis:
+    - notification-api
+---
+apiVersion: backstage.io/v1alpha1
+kind: API
+metadata:
+  name: user-api
+  description: 用户服务 API
+spec:
+  type: openapi
+  lifecycle: production
+  owner: group:platform-team
+  definition:
+    $text: https://api.example.com/openapi/user-service.yaml
+---
+apiVersion: backstage.io/v1alpha1
+kind: System
+metadata:
+  name: user-platform
+  description: 用户平台 - 包含用户相关的所有服务
+spec:
+  owner: group:platform-team
+  domain: company
+---
+apiVersion: backstage.io/v1alpha1
+kind: Domain
+metadata:
+  name: company
+  description: 公司业务域
+spec:
+  owner: group:engineering
+---
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: mysql-primary
+  description: 主 MySQL 数据库
+  annotations:
+    grafana/dashboard-id: mysql-primary
+spec:
+  type: database
+  lifecycle: production
+  owner: group:dba-team
+  system: user-platform
+---
+apiVersion: backstage.io/v1alpha1
+kind: Group
+metadata:
+  name: platform-team
+  description: 平台工程团队
+spec:
+  type: team
+  children: []
+  members:
+    - user:zhangsan
+    - user:lisi
+---
+apiVersion: backstage.io/v1alpha1
+kind: Template
+metadata:
+  name: create-spring-boot-service
+  description: 创建 Spring Boot 微服务
+  tags:
+    - java
+    - spring-boot
+    - microservice
+spec:
+  owner: group:platform-team
+  type: service
+  parameters:
+    - title: 服务信息
+      required:
+        - name
+        - description
+      properties:
+        name:
+          title: 服务名称
+          type: string
+          pattern: "^[a-z][a-z0-9-]*[a-z0-9]$"
+        description:
+          title: 服务描述
+          type: string
+    - title: 技术选型
+      properties:
+        javaVersion:
+          title: Java 版本
+          type: string
+          default: "17"
+          enum: ["11", "17", "21"]
+        database:
+          title: 数据库
+          type: string
+          default: mysql
+          enum: ["mysql", "postgresql", "mongodb"]
+  steps:
+    - id: fetch
+      name: Fetch Skeleton
+      action: fetch:template
+      input:
+        url: ./skeleton
+        values:
+          name: ${{ parameters.name }}
+          description: ${{ parameters.description }}
+          javaVersion: ${{ parameters.javaVersion }}
+    - id: publish
+      name: Publish to GitHub
+      action: github:repo:create
+      input:
+        repoUrl: github.com?repo=${{ parameters.name }}&org=company
+    - id: register
+      name: Register in Catalog
+      action: catalog:register
+      input:
+        repoContentsUrl: ${{ steps.publish.output.repoContentsUrl }}
+        catalogInfoPath: /catalog-info.yaml
