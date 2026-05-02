@@ -1,0 +1,120 @@
+# Prometheus 主配置文件
+# 企业级监控系统
+
+global:
+  scrape_interval: 15s          # 默认采集间隔
+  evaluation_interval: 15s      # 规则评估间隔
+  scrape_timeout: 10s           # 采集超时
+  external_labels:
+    cluster: 'production'
+    environment: 'prod'
+
+# 告警规则文件
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+# Alertmanager 配置
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+      timeout: 10s
+
+# 远程写入（可选，用于长期存储）
+# remote_write:
+#   - url: "http://thanos-receive:19291/api/v1/receive"
+
+# 采集目标配置
+scrape_configs:
+  #--------- Prometheus 自身 ---------
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+        labels:
+          instance: 'prometheus-server'
+
+  #--------- Node Exporter (主机监控) ---------
+  - job_name: 'node-exporter'
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/nodes.json
+        refresh_interval: 30s
+    relabel_configs:
+      - source_labels: [__address__]
+        regex: '(.+):(\d+)'
+        target_label: instance
+        replacement: '${1}'
+
+  #--------- cAdvisor (容器监控) ---------
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+    metric_relabel_configs:
+      # 过滤不需要的容器指标
+      - source_labels: [__name__]
+        regex: 'container_(cpu|memory|network|fs|tasks)_.*'
+        action: keep
+
+  #--------- Blackbox Exporter (探针监控) ---------
+  - job_name: 'blackbox-http'
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - https://www.baidu.com
+          - https://api.example.com/health
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+
+  #--------- Blackbox TCP 探针 ---------
+  - job_name: 'blackbox-tcp'
+    metrics_path: /probe
+    params:
+      module: [tcp_connect]
+    static_configs:
+      - targets:
+          - mysql-server:3306
+          - redis-server:6379
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+
+  #--------- Redis Exporter ---------
+  - job_name: 'redis'
+    static_configs:
+      - targets: ['redis-exporter:9121']
+    metrics_path: /metrics
+
+  #--------- MySQL Exporter ---------
+  - job_name: 'mysql'
+    static_configs:
+      - targets: ['mysql-exporter:9104']
+
+  #--------- Nginx Exporter ---------
+  - job_name: 'nginx'
+    static_configs:
+      - targets: ['nginx-exporter:9113']
+
+  #--------- K8S API Server (如果部署在K8S内) ---------
+  # - job_name: 'kubernetes-apiservers'
+  #   kubernetes_sd_configs:
+  #     - role: endpoints
+  #   scheme: https
+  #   tls_config:
+  #     ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+  #   bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+  #   relabel_configs:
+  #     - source_labels: [__meta_kubernetes_namespace, __meta_kubernetes_service_name, __meta_kubernetes_endpoint_port_name]
+  #       action: keep
+  #       regex: default;kubernetes;https

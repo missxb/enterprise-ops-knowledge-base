@@ -1,0 +1,138 @@
+# Alertmanager 告警路由配置
+# 支持：钉钉、企业微信、邮件、Webhook
+
+global:
+  resolve_timeout: 5m
+  # SMTP 配置
+  smtp_from: 'alert@example.com'
+  smtp_smarthost: 'smtp.example.com:465'
+  smtp_auth_username: 'alert@example.com'
+  smtp_auth_password: 'your-password'
+  smtp_require_tls: false
+
+# 告警模板
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+# 告警路由
+route:
+  # 默认接收者
+  receiver: 'default-receiver'
+  # 分组策略
+  group_by: ['alertname', 'cluster', 'service']
+  # 分组等待时间
+  group_wait: 30s
+  # 分组间隔
+  group_interval: 5m
+  # 重复间隔
+  repeat_interval: 4h
+
+  routes:
+    #--------- critical 告警 → 电话+钉钉+邮件 ---------
+    - match:
+        severity: critical
+      receiver: 'critical-receiver'
+      group_wait: 10s
+      repeat_interval: 30m
+      continue: true
+
+    #--------- warning 告警 → 钉钉+邮件 ---------
+    - match:
+        severity: warning
+      receiver: 'warning-receiver'
+      group_wait: 30s
+      repeat_interval: 2h
+      continue: true
+
+    #--------- info 告警 → 钉钉 ---------
+    - match:
+        severity: info
+      receiver: 'info-receiver'
+      group_wait: 5m
+      repeat_interval: 12h
+
+    #--------- 按类别路由 ---------
+    - match:
+        category: cpu
+      receiver: 'ops-cpu-receiver'
+      group_by: ['instance']
+
+    - match:
+        category: disk
+      receiver: 'ops-disk-receiver'
+      group_by: ['instance', 'mountpoint']
+
+    - match:
+        category: availability
+      receiver: 'critical-receiver'
+      group_wait: 10s
+      repeat_interval: 5m
+
+# 抑制规则
+inhibit_rules:
+  # critical 告警抑制同实例的 warning 告警
+  - source_match:
+      severity: 'critical'
+    target_match:
+      severity: 'warning'
+    equal: ['alertname', 'instance']
+
+  # 节点宕机时抑制该节点所有其他告警
+  - source_match:
+      alertname: 'NodeDown'
+    target_match_re:
+      instance: '.+'
+    equal: ['instance']
+
+# 接收者配置
+receivers:
+  #--------- 默认接收者 ---------
+  - name: 'default-receiver'
+    email_configs:
+      - to: 'ops-team@example.com'
+        send_resolved: true
+
+  #--------- Critical 接收者 ---------
+  - name: 'critical-receiver'
+    # 钉钉通知
+    webhook_configs:
+      - url: 'http://dingtalk-webhook:8060/dingtalk/ops-critical/send'
+        send_resolved: true
+        http_config:
+          follow_redirects: true
+    # 邮件通知
+    email_configs:
+      - to: 'ops-emergency@example.com'
+        send_resolved: true
+        headers:
+          Subject: '[紧急] {{ .GroupLabels.alertname }}'
+    # 企业微信通知
+    # webhook_configs:
+    #   - url: 'http://wechat-webhook:8060/wechat/ops/send'
+
+  #--------- Warning 接收者 ---------
+  - name: 'warning-receiver'
+    webhook_configs:
+      - url: 'http://dingtalk-webhook:8060/dingtalk/ops-warning/send'
+        send_resolved: true
+    email_configs:
+      - to: 'ops-team@example.com'
+        send_resolved: true
+
+  #--------- Info 接收者 ---------
+  - name: 'info-receiver'
+    webhook_configs:
+      - url: 'http://dingtalk-webhook:8060/dingtalk/ops-info/send'
+        send_resolved: true
+
+  #--------- CPU 专项接收者 ---------
+  - name: 'ops-cpu-receiver'
+    webhook_configs:
+      - url: 'http://dingtalk-webhook:8060/dingtalk/ops-cpu/send'
+        send_resolved: true
+
+  #--------- 磁盘专项接收者 ---------
+  - name: 'ops-disk-receiver'
+    webhook_configs:
+      - url: 'http://dingtalk-webhook:8060/dingtalk/ops-disk/send'
+        send_resolved: true

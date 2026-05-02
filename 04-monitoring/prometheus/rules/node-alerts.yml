@@ -1,0 +1,163 @@
+# 节点告警规则
+# 基于 node_exporter 指标
+
+groups:
+  - name: node-alerts
+    rules:
+      #==================== CPU 告警 ====================
+      - alert: HighCpuUsage
+        expr: 100 - (avg by(instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
+        for: 5m
+        labels:
+          severity: warning
+          category: cpu
+        annotations:
+          summary: "CPU使用率过高: {{ $labels.instance }}"
+          description: "CPU使用率已超过85%，当前值: {{ $value | printf \"%.1f\" }}%，持续5分钟"
+          runbook: "检查高CPU进程: top -c, ps aux --sort=-%cpu"
+
+      - alert: CriticalCpuUsage
+        expr: 100 - (avg by(instance) (irate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 95
+        for: 2m
+        labels:
+          severity: critical
+          category: cpu
+        annotations:
+          summary: "CPU使用率严重过高: {{ $labels.instance }}"
+          description: "CPU使用率已超过95%，当前值: {{ $value | printf \"%.1f\" }}%，持续2分钟，需要立即处理！"
+
+      #==================== 内存告警 ====================
+      - alert: HighMemoryUsage
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+          category: memory
+        annotations:
+          summary: "内存使用率过高: {{ $labels.instance }}"
+          description: "内存使用率已超过85%，当前值: {{ $value | printf \"%.1f\" }}%，可用内存: {{ with printf \"node_memory_MemAvailable_bytes{instance='%s'}\" $labels.instance | query }}{{ . | first | value | humanize }}{{ end }}"
+
+      - alert: CriticalMemoryUsage
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 95
+        for: 2m
+        labels:
+          severity: critical
+          category: memory
+        annotations:
+          summary: "内存使用率严重过高: {{ $labels.instance }}"
+          description: "内存使用率已超过95%，当前值: {{ $value | printf \"%.1f\" }}%，可能发生OOM！"
+
+      - alert: SwapUsageHigh
+        expr: (1 - node_memory_SwapFree_bytes / node_memory_SwapTotal_bytes) * 100 > 50
+        for: 10m
+        labels:
+          severity: warning
+          category: memory
+        annotations:
+          summary: "Swap使用率过高: {{ $labels.instance }}"
+          description: "Swap使用率超过50%，当前值: {{ $value | printf \"%.1f\" }}%，说明内存不足"
+
+      #==================== 磁盘告警 ====================
+      - alert: DiskSpaceWarning
+        expr: (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes) * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+          category: disk
+        annotations:
+          summary: "磁盘使用率过高: {{ $labels.instance }} {{ $labels.mountpoint }}"
+          description: "磁盘 {{ $labels.mountpoint }} 使用率超过80%，当前值: {{ $value | printf \"%.1f\" }}%"
+
+      - alert: DiskSpaceCritical
+        expr: (1 - node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes) * 100 > 90
+        for: 2m
+        labels:
+          severity: critical
+          category: disk
+        annotations:
+          summary: "磁盘使用率严重过高: {{ $labels.instance }} {{ $labels.mountpoint }}"
+          description: "磁盘 {{ $labels.mountpoint }} 使用率超过90%，当前值: {{ $value | printf \"%.1f\" }}%，需要立即清理！"
+
+      - alert: DiskIOHigh
+        expr: rate(node_disk_io_time_seconds_total[5m]) > 0.9
+        for: 10m
+        labels:
+          severity: warning
+          category: disk
+        annotations:
+          summary: "磁盘IO使用率过高: {{ $labels.instance }}"
+          description: "磁盘IO使用率超过90%，可能影响应用性能"
+
+      #==================== 网络告警 ====================
+      - alert: NetworkReceiveHigh
+        expr: rate(node_network_receive_bytes_total{device!~"lo|veth.*|docker.*|br-.*"}[5m]) > 100 * 1024 * 1024
+        for: 5m
+        labels:
+          severity: warning
+          category: network
+        annotations:
+          summary: "网络入流量过高: {{ $labels.instance }}"
+          description: "网络接收速率超过100MB/s，当前: {{ $value | humanize }}B/s"
+
+      - alert: NetworkTransmitHigh
+        expr: rate(node_network_transmit_bytes_total{device!~"lo|veth.*|docker.*|br-.*"}[5m]) > 100 * 1024 * 1024
+        for: 5m
+        labels:
+          severity: warning
+          category: network
+        annotations:
+          summary: "网络出流量过高: {{ $labels.instance }}"
+          description: "网络发送速率超过100MB/s，当前: {{ $value | humanize }}B/s"
+
+      #==================== 系统负载告警 ====================
+      - alert: HighSystemLoad
+        expr: node_load15 > count by(instance) (node_cpu_seconds_total{mode="idle"}) * 2
+        for: 15m
+        labels:
+          severity: warning
+          category: system
+        annotations:
+          summary: "系统负载过高: {{ $labels.instance }}"
+          description: "15分钟平均负载超过CPU核数×2，当前负载: {{ $value | printf \"%.1f\" }}"
+
+      #==================== 服务可用性 ====================
+      - alert: NodeExporterDown
+        expr: up{job="node-exporter"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          category: availability
+        annotations:
+          summary: "Node Exporter 不可用: {{ $labels.instance }}"
+          description: "Node Exporter 已停止响应超过1分钟"
+
+      - alert: NodeDown
+        expr: up{job="node-exporter"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          category: availability
+        annotations:
+          summary: "节点可能宕机: {{ $labels.instance }}"
+          description: "节点已5分钟无响应，可能宕机或网络中断"
+
+      #==================== 时间同步告警 ====================
+      - alert: TimeDriftHigh
+        expr: abs(node_timex_offset_seconds) > 1
+        for: 5m
+        labels:
+          severity: warning
+          category: system
+        annotations:
+          summary: "时间同步偏差过大: {{ $labels.instance }}"
+          description: "NTP时间偏差超过1秒，当前偏差: {{ $value | printf \"%.3f\" }}秒"
+
+      #==================== 系统重启告警 ====================
+      - alert: NodeReboot
+        expr: changes(node_boot_time_seconds[15m]) > 0
+        labels:
+          severity: info
+          category: system
+        annotations:
+          summary: "节点发生重启: {{ $labels.instance }}"
+          description: "节点在过去15分钟内发生了重启"
