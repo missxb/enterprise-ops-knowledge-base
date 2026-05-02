@@ -1,0 +1,61 @@
+#============================================================================
+# Ansible 主 Playbook - 完整服务器配置
+# 用法：ansible-playbook -i inventories/production site.yml
+#============================================================================
+
+---
+#==================== 基础配置 ====================
+- name: 基础系统配置
+  hosts: all
+  become: yes
+  roles:
+    - common
+  tags: [common, base]
+
+#==================== 安全加固 ====================
+- name: 安全加固
+  hosts: all
+  become: yes
+  roles:
+    - security
+  tags: [security]
+
+#==================== Docker 安装 ====================
+- name: Docker 安装与配置
+  hosts: docker_hosts
+  become: yes
+  roles:
+    - docker
+  tags: [docker]
+
+#==================== Nginx 配置 ====================
+- name: Nginx 配置
+  hosts: webservers
+  become: yes
+  roles:
+    - nginx
+  tags: [nginx, web]
+
+#==================== MySQL 配置 ====================
+- name: MySQL 配置
+  hosts: dbservers
+  become: yes
+  roles:
+    - mysql
+  tags: [mysql, db]
+
+#==================== Redis 配置 ====================
+- name: Redis 配置
+  hosts: redis_servers
+  become: yes
+  roles:
+    - redis
+  tags: [redis, cache]
+
+#==================== 监控部署 ====================
+- name: 监控 Agent 部署
+  hosts: all
+  become: yes
+  roles:
+    - monitoring
+  tags: [monitoring]

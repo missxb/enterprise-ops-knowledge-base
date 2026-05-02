@@ -1,0 +1,93 @@
+# Filebeat 配置文件
+# 企业级日志采集
+
+filebeat.inputs:
+  #==================== 系统日志 ====================
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/messages
+      - /var/log/secure
+      - /var/log/cron
+    fields:
+      log_type: system
+    multiline:
+      pattern: '^\d{4}-\d{2}-\d{2}'
+      negate: true
+      match: after
+
+  #==================== Nginx 日志 ====================
+  - type: log
+    enabled: true
+    paths:
+      - /var/log/nginx/access.log
+      - /var/log/nginx/error.log
+    fields:
+      log_type: nginx
+    json.keys_under_root: true
+    json.overwrite_keys: true
+
+  #==================== 应用日志 ====================
+  - type: log
+    enabled: true
+    paths:
+      - /data/logs/*.log
+      - /data/logs/**/*.log
+    fields:
+      log_type: application
+    multiline.pattern: '^\d{4}-\d{2}-\d{2}T'
+    multiline.negate: true
+    multiline.match: after
+    multiline.max_lines: 100
+
+  #==================== Docker 容器日志 ====================
+  - type: container
+    enabled: true
+    paths:
+      - /var/lib/docker/containers/*/*.log
+    processors:
+      - add_kubernetes_metadata:
+          host: ${NODE_NAME}
+          default_matchers.enabled: false
+          matchers:
+            - logs_path:
+                logs_path: "/var/lib/docker/containers/"
+
+#==================== 处理器 ====================
+processors:
+  - add_host_metadata:
+      when.not.contains.tags: forwarded
+  - add_cloud_metadata: ~
+  - add_docker_metadata: ~
+  - drop_event:
+      when:
+        regexp:
+          message: "health|heartbeat|ping"
+
+#==================== 输出到 Kafka ====================
+output.kafka:
+  enabled: true
+  hosts: ["kafka:9092"]
+  topic: "filebeat-logs"
+  partition.round_robin:
+    reachable_only: false
+  required_acks: 1
+  compression: gzip
+  max_message_bytes: 10485760
+
+#==================== 输出到 Elasticsearch（备用） ====================
+# output.elasticsearch:
+#   hosts: ["elasticsearch:9200"]
+#   index: "filebeat-%{[agent.version]}-%{+yyyy.MM.dd}"
+#   pipeline: "filebeat-pipeline"
+
+#==================== 输出到 Logstash（备用） ====================
+# output.logstash:
+#   hosts: ["logstash:5044"]
+#   loadbalance: true
+
+#==================== 日志配置 ====================
+logging.level: info
+logging.to_stderr: true
+logging.metrics.enabled: true
+logging.metrics.period: 60s

@@ -1,0 +1,339 @@
+#============================================================================
+# 企业级 GitLab CI/CD Pipeline
+# 支持：多语言构建、安全扫描、多环境部署、灰度发布
+#============================================================================
+
+# 全局配置
+default:
+  image: docker:24.0-dind
+  services:
+    - docker:24.0-dind
+  tags:
+    - docker
+  before_script:
+    - echo "Pipeline ID: ${CI_PIPELINE_ID}"
+    - echo "Commit: ${CI_COMMIT_SHORT_SHA}"
+    - echo "Branch: ${CI_COMMIT_REF_NAME}"
+
+# 全局变量
+variables:
+  # Docker 配置
+  DOCKER_TLS_CERTDIR: "/certs"
+  DOCKER_HOST: tcp://docker:2376
+  DOCKER_TLS_VERIFY: 1
+  DOCKER_CERT_PATH: "$DOCKER_TLS_CERTDIR/client"
+  # Harbor 配置
+  HARBOR_REGISTRY: "harbor.example.com"
+  HARBOR_PROJECT: "enterprise"
+  # 应用配置
+  APP_NAME: "myapp"
+  APP_PORT: "8080"
+  # SonarQube 配置
+  SONAR_HOST_URL: "http://sonarqube.example.com"
+  # K8S 配置
+  KUBE_NAMESPACE_DEV: "dev"
+  KUBE_NAMESPACE_STG: "staging"
+  KUBE_NAMESPACE_PROD: "production"
+  # 镜像标签
+  IMAGE_TAG: "${CI_COMMIT_SHORT_SHA}"
+  IMAGE_FULL: "${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${APP_NAME}:${IMAGE_TAG}"
+
+# 阶段定义
+stages:
+  - build
+  - test
+  - scan
+  - package
+  - deploy-dev
+  - deploy-staging
+  - deploy-production
+
+#----------------------------------------------------------------------
+# Stage 1: 构建
+#----------------------------------------------------------------------
+build:
+  stage: build
+  image: maven:3.9-eclipse-temurin-17  # Java 项目示例
+  script:
+    - echo "========== 开始构建 =========="
+    - mvn clean package -DskipTests -B
+    - echo "构建完成: target/*.jar"
+  artifacts:
+    paths:
+      - target/*.jar
+    expire_in: 1 hour
+  cache:
+    key: "${CI_COMMIT_REF_SLUG}"
+    paths:
+      - .m2/repository
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+    - if: '$CI_COMMIT_BRANCH =~ /^release\/.*/'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+#----------------------------------------------------------------------
+# Stage 2: 测试
+#----------------------------------------------------------------------
+unit-test:
+  stage: test
+  image: maven:3.9-eclipse-temurin-17
+  script:
+    - echo "========== 单元测试 =========="
+    - mvn test -B
+    - echo "测试完成"
+  artifacts:
+    reports:
+      junit: target/surefire-reports/*.xml
+    paths:
+      - target/site/jacoco/
+    expire_in: 1 week
+  coverage: '/Total.*?(\d+%)/'
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+    - if: '$CI_COMMIT_BRANCH =~ /^release\/.*/'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+integration-test:
+  stage: test
+  image: maven:3.9-eclipse-temurin-17
+  services:
+    - name: mysql:8.0
+      alias: test-db
+      variables:
+        MYSQL_ROOT_PASSWORD: testpass
+        MYSQL_DATABASE: testdb
+    - name: redis:7-alpine
+      alias: test-redis
+  script:
+    - echo "========== 集成测试 =========="
+    - mvn verify -B -P integration-test
+  artifacts:
+    reports:
+      junit: target/failsafe-reports/*.xml
+    expire_in: 1 week
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+    - if: '$CI_COMMIT_BRANCH =~ /^release\/.*/'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+#----------------------------------------------------------------------
+# Stage 3: 安全扫描
+#----------------------------------------------------------------------
+sonarqube-scan:
+  stage: scan
+  image: sonarsource/sonar-scanner-cli:latest
+  variables:
+    SONAR_USER_HOME: "${CI_PROJECT_DIR}/.sonar"
+    GIT_DEPTH: "0"
+  script:
+    - echo "========== SonarQube 代码扫描 =========="
+    - >
+      sonar-scanner
+      -Dsonar.projectKey=${CI_PROJECT_NAME}
+      -Dsonar.projectName=${CI_PROJECT_NAME}
+      -Dsonar.projectVersion=${CI_COMMIT_SHORT_SHA}
+      -Dsonar.sources=src/main
+      -Dsonar.tests=src/test
+      -Dsonar.java.binaries=target/classes
+      -Dsonar.java.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml
+      -Dsonar.qualitygate.wait=true
+      -Dsonar.qualitygate.timeout=300
+  allow_failure: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+    - if: '$CI_COMMIT_BRANCH =~ /^release\/.*/'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+dependency-check:
+  stage: scan
+  image: owasp/dependency-check:latest
+  script:
+    - echo "========== 依赖安全检查 =========="
+    - /usr/share/dependency-check/bin/dependency-check.sh
+      --project "${CI_PROJECT_NAME}"
+      --scan .
+      --format HTML
+      --format JSON
+      --out dependency-check-report
+      --failOnCVSS 7
+  artifacts:
+    paths:
+      - dependency-check-report/
+    expire_in: 1 week
+  allow_failure: true
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^release\/.*/'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+#----------------------------------------------------------------------
+# Stage 4: 镜像打包 & 安全扫描
+#----------------------------------------------------------------------
+docker-build:
+  stage: package
+  script:
+    - echo "========== 构建 Docker 镜像 =========="
+    - echo "${HARBOR_PASSWORD}" | docker login ${HARBOR_REGISTRY} -u ${HARBOR_USER} --password-stdin
+    - docker build -t ${IMAGE_FULL} .
+    - docker push ${IMAGE_FULL}
+    - echo "镜像已推送: ${IMAGE_FULL}"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+    - if: '$CI_COMMIT_BRANCH =~ /^release\/.*/'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+trivy-scan:
+  stage: package
+  image:
+    name: aquasec/trivy:latest
+    entrypoint: [""]
+  script:
+    - echo "========== Trivy 镜像安全扫描 =========="
+    - trivy image --exit-code 0 --severity LOW,MEDIUM --no-progress ${IMAGE_FULL}
+    - trivy image --exit-code 1 --severity HIGH,CRITICAL --no-progress ${IMAGE_FULL}
+    # 生成 HTML 报告
+    - trivy image --format template --template "@contrib/html.tpl" -o trivy-report.html ${IMAGE_FULL}
+  artifacts:
+    paths:
+      - trivy-report.html
+    expire_in: 1 week
+  dependencies:
+    - docker-build
+  allow_failure: true
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+    - if: '$CI_COMMIT_BRANCH =~ /^release\/.*/'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+
+#----------------------------------------------------------------------
+# Stage 5: 部署 Dev 环境（自动）
+#----------------------------------------------------------------------
+deploy-dev:
+  stage: deploy-dev
+  image:
+    name: bitnami/kubectl:latest
+    entrypoint: [""]
+  environment:
+    name: development
+    url: https://dev.example.com
+    on_stop: stop-dev
+  script:
+    - echo "========== 部署到 Dev 环境 =========="
+    - kubectl config use-context dev-cluster
+    - kubectl set image deployment/${APP_NAME} ${APP_NAME}=${IMAGE_FULL} -n ${KUBE_NAMESPACE_DEV}
+    - kubectl rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE_DEV} --timeout=300s
+    - echo "Dev 环境部署完成"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+
+stop-dev:
+  stage: deploy-dev
+  image:
+    name: bitnami/kubectl:latest
+    entrypoint: [""]
+  environment:
+    name: development
+    action: stop
+  script:
+    - kubectl delete deployment ${APP_NAME} -n ${KUBE_NAMESPACE_DEV} --ignore-not-found
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "develop"'
+      when: manual
+  allow_failure: true
+
+#----------------------------------------------------------------------
+# Stage 6: 部署 Staging 环境（手动审批）
+#----------------------------------------------------------------------
+deploy-staging:
+  stage: deploy-staging
+  image:
+    name: bitnami/kubectl:latest
+    entrypoint: [""]
+  environment:
+    name: staging
+    url: https://staging.example.com
+  script:
+    - echo "========== 部署到 Staging 环境 =========="
+    - kubectl config use-context staging-cluster
+    - kubectl set image deployment/${APP_NAME} ${APP_NAME}=${IMAGE_FULL} -n ${KUBE_NAMESPACE_STG}
+    - kubectl rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE_STG} --timeout=300s
+    - echo "Staging 环境部署完成"
+  rules:
+    - if: '$CI_COMMIT_BRANCH =~ /^release\/.*/'
+      when: manual
+
+#----------------------------------------------------------------------
+# Stage 7: 部署 Production 环境（灰度 + 审批）
+#----------------------------------------------------------------------
+deploy-production-canary:
+  stage: deploy-production
+  image:
+    name: bitnami/kubectl:latest
+    entrypoint: [""]
+  environment:
+    name: production-canary
+    url: https://canary.example.com
+  script:
+    - echo "========== 灰度部署到 Production =========="
+    - kubectl config use-context prod-cluster
+    # 创建灰度 Deployment
+    - >
+      kubectl create deployment ${APP_NAME}-canary
+      --image=${IMAGE_FULL}
+      -n ${KUBE_NAMESPACE_PROD}
+      --dry-run=client -o yaml |
+      kubectl apply -f -
+    # 设置灰度副本数（10%流量）
+    - kubectl scale deployment/${APP_NAME}-canary --replicas=1 -n ${KUBE_NAMESPACE_PROD}
+    # 等待就绪
+    - kubectl rollout status deployment/${APP_NAME}-canary -n ${KUBE_NAMESPACE_PROD} --timeout=300s
+    - echo "灰度部署完成，观察15分钟后确认全量发布"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+
+deploy-production-full:
+  stage: deploy-production
+  image:
+    name: bitnami/kubectl:latest
+    entrypoint: [""]
+  environment:
+    name: production
+    url: https://www.example.com
+  script:
+    - echo "========== 全量部署到 Production =========="
+    - kubectl config use-context prod-cluster
+    # 更新主 Deployment
+    - kubectl set image deployment/${APP_NAME} ${APP_NAME}=${IMAGE_FULL} -n ${KUBE_NAMESPACE_PROD}
+    - kubectl rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE_PROD} --timeout=600s
+    # 删除灰度 Deployment
+    - kubectl delete deployment ${APP_NAME}-canary -n ${KUBE_NAMESPACE_PROD} --ignore-not-found
+    - echo "Production 全量部署完成"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+  needs:
+    - deploy-production-canary
+
+#----------------------------------------------------------------------
+# 回滚 Job
+#----------------------------------------------------------------------
+rollback-production:
+  stage: deploy-production
+  image:
+    name: bitnami/kubectl:latest
+    entrypoint: [""]
+  environment:
+    name: production
+  script:
+    - echo "========== 回滚 Production =========="
+    - kubectl config use-context prod-cluster
+    - kubectl rollout undo deployment/${APP_NAME} -n ${KUBE_NAMESPACE_PROD}
+    - kubectl rollout status deployment/${APP_NAME} -n ${KUBE_NAMESPACE_PROD} --timeout=300s
+    - echo "回滚完成"
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual
+  allow_failure: true

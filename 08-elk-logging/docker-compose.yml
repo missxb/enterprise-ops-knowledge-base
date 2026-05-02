@@ -1,0 +1,156 @@
+version: '3.8'
+
+# ELK 日志系统 Docker Compose 部署
+# 包含：Elasticsearch + Logstash + Kibana + Filebeat + Kafka
+
+services:
+  #==================== Zookeeper (Kafka 依赖) ====================
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    restart: unless-stopped
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper_data:/var/lib/zookeeper/data
+      - zookeeper_log:/var/lib/zookeeper/log
+    networks:
+      - elk
+
+  #==================== Kafka (日志缓冲) ====================
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    restart: unless-stopped
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_LOG_RETENTION_HOURS: 72
+      KAFKA_MESSAGE_MAX_BYTES: 10485760
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    networks:
+      - elk
+
+  #==================== Elasticsearch ====================
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.10.0
+    container_name: elasticsearch
+    restart: unless-stopped
+    environment:
+      - discovery.type=single-node
+      - cluster.name=elk-cluster
+      - node.name=es-node-1
+      - bootstrap.memory_lock=true
+      - xpack.security.enabled=false
+      - xpack.security.http.ssl.enabled=false
+      - "ES_JAVA_OPTS=-Xms2g -Xmx2g"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+      - ./elasticsearch/elasticsearch.yml:/usr/share/elasticsearch/config/elasticsearch.yml:ro
+    networks:
+      - elk
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  #==================== Logstash ====================
+  logstash:
+    image: docker.elastic.co/logstash/logstash:8.10.0
+    container_name: logstash
+    restart: unless-stopped
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    ports:
+      - "5044:5044"     # Beats 输入
+      - "5000:5000"     # TCP 输入
+      - "9600:9600"     # API
+    environment:
+      - "LS_JAVA_OPTS=-Xms1g -Xmx1g"
+    volumes:
+      - ./logstash/logstash.yml:/usr/share/logstash/config/logstash.yml:ro
+      - ./logstash/pipeline:/usr/share/logstash/pipeline:ro
+    networks:
+      - elk
+
+  #==================== Kibana ====================
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.10.0
+    container_name: kibana
+    restart: unless-stopped
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    ports:
+      - "5601:5601"
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - SERVER_NAME=kibana
+      - XPACK_SECURITY_ENABLED=false
+    volumes:
+      - ./kibana/kibana.yml:/usr/share/kibana/config/kibana.yml:ro
+    networks:
+      - elk
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:5601/api/status || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  #==================== Filebeat ====================
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:8.10.0
+    container_name: filebeat
+    restart: unless-stopped
+    depends_on:
+      - elasticsearch
+    user: root
+    volumes:
+      - ./config/filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - /var/log:/var/log:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - filebeat_data:/usr/share/filebeat/data
+    networks:
+      - elk
+
+#==================== 数据卷 ====================
+volumes:
+  es_data:
+    driver: local
+  kafka_data:
+    driver: local
+  zookeeper_data:
+    driver: local
+  zookeeper_log:
+    driver: local
+  filebeat_data:
+    driver: local
+
+#==================== 网络 ====================
+networks:
+  elk:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16

@@ -1,0 +1,257 @@
+#============================================================================
+# 企业级 K8S 部署模板
+# 包含：Deployment + Service + Ingress + HPA + PDB + ConfigMap
+#============================================================================
+
+#==================== Namespace ====================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ${NAMESPACE}
+  labels:
+    app.kubernetes.io/part-of: enterprise
+
+---
+#==================== ConfigMap ====================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ${APP_NAME}-config
+  namespace: ${NAMESPACE}
+data:
+  application.yml: |
+    server:
+      port: 8080
+    spring:
+      profiles:
+        active: ${ENV}
+    management:
+      endpoints:
+        web:
+          exposure:
+            include: health,info,metrics,prometheus
+
+---
+#==================== Deployment ====================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${APP_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    app: ${APP_NAME}
+    version: ${VERSION}
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: ${APP_NAME}
+  template:
+    metadata:
+      labels:
+        app: ${APP_NAME}
+        version: ${VERSION}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/actuator/prometheus"
+    spec:
+      # 亲和性：Pod 分散到不同节点
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - ${APP_NAME}
+                topologyKey: kubernetes.io/hostname
+      # 优雅终止
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: ${APP_NAME}
+          image: ${IMAGE}
+          ports:
+            - containerPort: 8080
+              protocol: TCP
+          # 环境变量
+          env:
+            - name: SPRING_PROFILES_ACTIVE
+              value: "${ENV}"
+            - name: JAVA_OPTS
+              value: "-XX:+UseG1GC -XX:MaxRAMPercentage=75.0"
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: ${APP_NAME}-secrets
+                  key: db-host
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: ${APP_NAME}-secrets
+                  key: db-password
+          # 资源限制
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"
+          # 启动探针（给 Java 应用足够启动时间）
+          startupProbe:
+            httpGet:
+              path: /actuator/health
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
+          # 就绪探针
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # 存活探针
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: 8080
+            initialDelaySeconds: 60
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # 生命周期钩子
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 10"]
+          # 配置挂载
+          volumeMounts:
+            - name: config
+              mountPath: /app/config
+              readOnly: true
+            - name: logs
+              mountPath: /app/logs
+      volumes:
+        - name: config
+          configMap:
+            name: ${APP_NAME}-config
+        - name: logs
+          emptyDir: {}
+
+---
+#==================== Service ====================
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${APP_NAME}
+  namespace: ${NAMESPACE}
+  labels:
+    app: ${APP_NAME}
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 8080
+      protocol: TCP
+      name: http
+  selector:
+    app: ${APP_NAME}
+
+---
+#==================== Ingress ====================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ${APP_NAME}
+  namespace: ${NAMESPACE}
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - ${HOST}
+      secretName: ${APP_NAME}-tls
+  rules:
+    - host: ${HOST}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ${APP_NAME}
+                port:
+                  number: 80
+
+---
+#==================== HPA (水平自动伸缩) ====================
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ${APP_NAME}
+  namespace: ${NAMESPACE}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ${APP_NAME}
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+
+---
+#==================== PDB (Pod 中断预算) ====================
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ${APP_NAME}
+  namespace: ${NAMESPACE}
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: ${APP_NAME}
