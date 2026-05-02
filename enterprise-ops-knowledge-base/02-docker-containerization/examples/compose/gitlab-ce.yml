@@ -1,0 +1,76 @@
+# ============================================================
+# GitLab CE 社区版
+# ============================================================
+
+version: "3.8"
+
+services:
+  gitlab:
+    image: gitlab/gitlab-ce:16.8-ce.0
+    container_name: gitlab
+    hostname: gitlab.example.com
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        # 外部访问地址
+        external_url 'https://gitlab.example.com'
+        # NGINX 配置
+        nginx['listen_port'] = 80
+        nginx['listen_https'] = false
+        # SSH 端口
+        gitlab_rails['gitlab_shell_ssh_port'] = 2222
+        # SMTP 邮件配置
+        gitlab_rails['smtp_enable'] = true
+        gitlab_rails['smtp_address'] = "smtp.example.com"
+        gitlab_rails['smtp_port'] = 587
+        gitlab_rails['smtp_user_name'] = "gitlab@example.com"
+        gitlab_rails['smtp_password'] = "smtp_password"
+        gitlab_rails['smtp_domain'] = "example.com"
+        gitlab_rails['smtp_authentication'] = "login"
+        gitlab_rails['smtp_enable_starttls_auto'] = true
+        # 数据库配置
+        postgresql['shared_buffers'] = "256MB"
+        # Redis 配置
+        redis['maxmemory'] = "256mb"
+        redis['maxmemory_policy'] = "allkeys-lru"
+        # Prometheus 监控
+        prometheus['enable'] = true
+        grafana['enable'] = true
+        # 备份配置
+        gitlab_rails['backup_keep_time'] = 604800
+    ports:
+      - "80:80"
+      - "443:443"
+      - "2222:22"
+    volumes:
+      - gitlab_config:/etc/gitlab
+      - gitlab_logs:/var/log/gitlab
+      - gitlab_data:/var/opt/gitlab
+    shm_size: "256m"
+    networks:
+      - gitlab
+    restart: unless-stopped
+
+  # GitLab Runner（可选）
+  gitlab-runner:
+    image: gitlab/gitlab-runner:latest
+    container_name: gitlab-runner
+    volumes:
+      - runner_config:/etc/gitlab-runner
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - gitlab
+    networks:
+      - gitlab
+    restart: unless-stopped
+    profiles:
+      - ci
+
+volumes:
+  gitlab_config:
+  gitlab_logs:
+  gitlab_data:
+  runner_config:
+
+networks:
+  gitlab:
+    driver: bridge

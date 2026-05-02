@@ -1,0 +1,65 @@
+stages:
+  - test
+  - build
+  - deploy-staging
+  - deploy-production
+
+variables:
+  DOCKER_REGISTRY: registry.example.com
+  IMAGE_NAME: $DOCKER_REGISTRY/$CI_PROJECT_NAME
+
+# 测试
+test:
+  stage: test
+  image: maven:3.9-eclipse-temurin-17
+  script:
+    - mvn test
+  artifacts:
+    reports:
+      junit: target/surefire-reports/*.xml
+  only:
+    - merge_requests
+    - main
+
+# 构建镜像
+build:
+  stage: build
+  image: docker:24
+  services:
+    - docker:24-dind
+  script:
+    - docker build -t $IMAGE_NAME:$CI_PIPELINE_IID .
+    - docker tag $IMAGE_NAME:$CI_PIPELINE_IID $IMAGE_NAME:latest
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $DOCKER_REGISTRY
+    - docker push $IMAGE_NAME:$CI_PIPELINE_IID
+    - docker push $IMAGE_NAME:latest
+  only:
+    - main
+    - tags
+
+# 部署 Staging
+deploy-staging:
+  stage: deploy-staging
+  image: bitnami/kubectl:latest
+  script:
+    - kubectl set image deployment/$CI_PROJECT_NAME $CI_PROJECT_NAME=$IMAGE_NAME:$CI_PIPELINE_IID -n staging
+    - kubectl rollout status deployment/$CI_PROJECT_NAME -n staging --timeout=300s
+  environment:
+    name: staging
+    url: https://staging.example.com
+  only:
+    - main
+
+# 部署 Production
+deploy-production:
+  stage: deploy-production
+  image: bitnami/kubectl:latest
+  script:
+    - kubectl set image deployment/$CI_PROJECT_NAME $CI_PROJECT_NAME=$IMAGE_NAME:$CI_PIPELINE_IID -n production
+    - kubectl rollout status deployment/$CI_PROJECT_NAME -n production --timeout=300s
+  environment:
+    name: production
+    url: https://www.example.com
+  when: manual
+  only:
+    - main

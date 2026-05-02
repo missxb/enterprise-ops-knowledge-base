@@ -1,0 +1,10 @@
+---
+- hosts: webservers
+  become: yes
+  roles:
+    - common
+    - nginx
+    - docker
+  vars:
+    nginx_worker_connections: 4096
+    docker_version: "24.0"

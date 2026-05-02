@@ -1,0 +1,11 @@
+apiVersion: v2
+name: enterprise-app
+description: 企业级应用 Helm Chart
+type: application
+version: 1.0.0
+appVersion: "1.0.0"
+dependencies:
+  - name: redis
+    version: 18.x.x
+    repository: https://charts.bitnami.com/bitnami
+    condition: redis.enabled

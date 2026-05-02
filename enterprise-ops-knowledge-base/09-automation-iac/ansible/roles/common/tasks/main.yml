@@ -1,0 +1,53 @@
+---
+- name: 设置主机名
+  hostname:
+    name: "{{ inventory_hostname }}"
+
+- name: 配置 DNS
+  template:
+    src: resolv.conf.j2
+    dest: /etc/resolv.conf
+
+- name: 配置 NTP
+  template:
+    src: ntp.conf.j2
+    dest: /etc/chrony.conf
+  notify: restart chronyd
+
+- name: 安装基础软件
+  yum:
+    name:
+      - vim
+      - wget
+      - curl
+      - net-tools
+      - lsof
+      - htop
+      - iotop
+      - sysstat
+      - strace
+      - tcpdump
+    state: present
+
+- name: 配置 sysctl
+  sysctl:
+    name: "{{ item.key }}"
+    value: "{{ item.value }}"
+    sysctl_set: yes
+    state: present
+    reload: yes
+  loop:
+    - { key: "net.ipv4.ip_forward", value: "1" }
+    - { key: "net.ipv4.tcp_syncookies", value: "1" }
+    - { key: "vm.swappiness", value: "10" }
+    - { key: "net.core.somaxconn", value: "65535" }
+
+- name: 配置文件描述符限制
+  pam_limits:
+    domain: '*'
+    limit_type: "{{ item.type }}"
+    limit_item: nofile
+    value: "{{ item.value }}"
+  loop:
+    - { type: soft, value: "655360" }
+    - { type: hard, value: "655360" }

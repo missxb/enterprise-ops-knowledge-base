@@ -1,0 +1,115 @@
+pipeline {
+    agent {
+        kubernetes {
+            yaml '''
+                apiVersion: v1
+                kind: Pod
+                spec:
+                  containers:
+                  - name: maven
+                    image: maven:3.9-eclipse-temurin-17
+                    command: ['cat']
+                    tty: true
+                  - name: docker
+                    image: docker:24-dind
+                    securityContext:
+                      privileged: true
+                    env:
+                    - name: DOCKER_TLS_CERTDIR
+                      value: ""
+            '''
+        }
+    }
+
+    environment {
+        REGISTRY = 'registry.example.com'
+        IMAGE_NAME = "${REGISTRY}/${JOB_NAME}"
+        KUBECONFIG = credentials('kubeconfig')
+    }
+
+    options {
+        timeout(time: 30, unit: 'MINUTES')
+        disableConcurrentBuilds()
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Test') {
+            steps {
+                container('maven') {
+                    sh 'mvn test'
+                }
+            }
+            post {
+                always {
+                    junit 'target/surefire-reports/*.xml'
+                }
+            }
+        }
+
+        stage('Build') {
+            steps {
+                container('maven') {
+                    sh 'mvn package -DskipTests'
+                }
+            }
+        }
+
+        stage('Docker Build & Push') {
+            steps {
+                container('docker') {
+                    script {
+                        def imageTag = "${env.BUILD_NUMBER}-${env.GIT_COMMIT[0..7]}"
+                        sh """
+                            docker build -t ${IMAGE_NAME}:${imageTag} .
+                            docker tag ${IMAGE_NAME}:${imageTag} ${IMAGE_NAME}:latest
+                            docker push ${IMAGE_NAME}:${imageTag}
+                            docker push ${IMAGE_NAME}:latest
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Deploy to Staging') {
+            steps {
+                sh """
+                    kubectl set image deployment/${JOB_NAME} ${JOB_NAME}=${IMAGE_NAME}:${env.BUILD_NUMBER} -n staging
+                    kubectl rollout status deployment/${JOB_NAME} -n staging --timeout=300s
+                """
+            }
+        }
+
+        stage('Deploy to Production') {
+            when {
+                branch 'main'
+            }
+            input {
+                message "确认部署到生产环境?"
+                ok "部署"
+            }
+            steps {
+                sh """
+                    kubectl set image deployment/${JOB_NAME} ${JOB_NAME}=${IMAGE_NAME}:${env.BUILD_NUMBER} -n production
+                    kubectl rollout status deployment/${JOB_NAME} -n production --timeout=300s
+                """
+            }
+        }
+    }
+
+    post {
+        failure {
+            sh 'kubectl rollout undo deployment/${JOB_NAME} -n production || true'
+            slackSend channel: '#ci-cd', message: "❌ 构建失败: ${JOB_NAME} #${BUILD_NUMBER}"
+        }
+        success {
+            slackSend channel: '#ci-cd', message: "✅ 构建成功: ${JOB_NAME} #${BUILD_NUMBER}"
+        }
+    }
+}

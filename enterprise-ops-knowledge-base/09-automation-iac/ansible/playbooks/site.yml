@@ -1,0 +1,4 @@
+---
+# 主 Playbook - 完整环境部署
+- import_playbook: webservers.yml
+- import_playbook: dbservers.yml

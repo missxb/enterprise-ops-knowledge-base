@@ -1,0 +1,127 @@
+groups:
+  - name: node-alerts
+    rules:
+      - alert: HighCPUUsage
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU 使用率过高: {{ $labels.instance }}"
+          description: "CPU 使用率 {{ $value | printf \"%.1f\" }}%，持续超过 5 分钟"
+
+      - alert: HighMemoryUsage
+        expr: (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100 > 90
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "内存使用率过高: {{ $labels.instance }}"
+          description: "内存使用率 {{ $value | printf \"%.1f\" }}%"
+
+      - alert: DiskSpaceLow
+        expr: (1 - node_filesystem_avail_bytes{fstype!="tmpfs"} / node_filesystem_size_bytes) * 100 > 85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "磁盘空间不足: {{ $labels.instance }}"
+          description: "挂载点 {{ $labels.mountpoint }} 使用率 {{ $value | printf \"%.1f\" }}%"
+
+      - alert: DiskWillFullIn24h
+        expr: predict_linear(node_filesystem_avail_bytes{fstype!="tmpfs"}[6h], 24*3600) < 0
+        for: 30m
+        labels:
+          severity: critical
+        annotations:
+          summary: "磁盘将在24小时内用尽: {{ $labels.instance }}"
+
+      - alert: HighIOWait
+        expr: avg by(instance) (rate(node_cpu_seconds_total{mode="iowait"}[5m])) * 100 > 20
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "IO 等待过高: {{ $labels.instance }}"
+
+      - alert: NodeDown
+        expr: up{job="node-exporter"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "节点宕机: {{ $labels.instance }}"
+
+  - name: mysql-alerts
+    rules:
+      - alert: MySQLSlaveDelay
+        expr: mysql_slave_status_seconds_behind_master > 30
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MySQL 主从延迟: {{ $labels.instance }}"
+          description: "延迟 {{ $value }} 秒"
+
+      - alert: MySQLTooManyConnections
+        expr: mysql_global_status_threads_connected / mysql_global_variables_max_connections * 100 > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MySQL 连接数过高"
+
+      - alert: MySQLSlowQueries
+        expr: rate(mysql_global_status_slow_queries[5m]) > 0.1
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "MySQL 慢查询增多"
+
+  - name: redis-alerts
+    rules:
+      - alert: RedisHighMemory
+        expr: redis_memory_used_bytes / redis_memory_max_bytes * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis 内存使用率过高"
+
+      - alert: RedisLowHitRate
+        expr: rate(redis_keyspace_hits_total[5m]) / (rate(redis_keyspace_hits_total[5m]) + rate(redis_keyspace_misses_total[5m])) * 100 < 80
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Redis 命中率过低"
+
+  - name: nginx-alerts
+    rules:
+      - alert: NginxHigh5xxRate
+        expr: rate(nginx_http_requests_total{status=~"5.."}[5m]) / rate(nginx_http_requests_total[5m]) * 100 > 5
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Nginx 5xx 错误率过高"
+
+  - name: blackbox-alerts
+    rules:
+      - alert: EndpointDown
+        expr: probe_success == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "端点不可达: {{ $labels.instance }}"
+
+      - alert: SSLCertExpiringSoon
+        expr: probe_ssl_earliest_cert_expiry - time() < 86400 * 30
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "SSL 证书即将过期: {{ $labels.instance }}"
+          description: "证书将在 {{ $value | humanizeDuration }} 后过期"
